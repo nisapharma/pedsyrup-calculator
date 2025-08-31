@@ -1,0 +1,813 @@
+import React, { useEffect, useMemo, useRef, useState } from "react";
+
+/**
+ * NISAPHARMA Pediatric Syrup Dose Calculator — Canvas Build (fixed)
+ * - Thai UI (UTF-8)
+ * - Product selector moved to LEFT, above patient inputs (per user request)
+ * - Notes + Important warning banners under product
+ * - Add/Edit product (supports notes + warning)
+ * - Results on left, total volume, schedule + copy summary
+ * - Lightweight local-only usage stats (visits/calculations)
+ * - Console-based self tests (kept as-is, with additional tests)
+ * - Mobile: header buttons collapse into a single “เมนู” popover
+ * - Header is NOT sticky (per request)
+ */
+
+// ---------------- Types ----------------
+export type Product = {
+  id: string;
+  name: string;
+  strengthMgPerMl: number;
+  meta?: {
+    mgkgRange?: string;      // e.g. "10-15"
+    mgkgDefault?: number;    // typical mg/kg
+    mgkgMin?: number;        // min for range UI
+    mgkgMax?: number;        // max for range UI
+    minIntervalHours?: number;
+    maxDosesPerDay?: number;
+    maxPerKgPerDay?: number;
+    maxPerDayMg?: number;
+    maxPerDoseMg?: number;
+    notes?: string;          // free text (shows as green info box)
+    warning?: string;        // red banner
+    // --- Alt-unit support ---
+    displayStrength?: string;    // e.g. "5 mcg/mL" or "100,000 units/mL"
+    altUnitPerMl?: number;       // e.g. 100000 (units per mL) or 5 (mcg per mL)
+    altUnitLabel?: string;        // e.g. "mcg" | "IU" | "units"
+    addedAt?: number;             // epoch ms for "recently added" sorting
+  };
+};
+
+// ---------------- Samples ----------------
+const SAMPLE_PRODUCTS: Product[] = [
+  { id: "pcm-24", name: "Paracetamol Syrup 120 mg/5 mL (เด็กเล็ก)", strengthMgPerMl: 24, meta: { mgkgRange: "10-15", mgkgDefault: 12.5, mgkgMin: 10, mgkgMax: 15, minIntervalHours: 4, maxDosesPerDay: 6, maxPerKgPerDay: 60, maxPerDayMg: 4000, notes: "10–15 mg/kg/ครั้ง q4–6h; ไม่เกิน 60 mg/kg/วัน หรือ 4 g/วัน" } },
+  { id: "para-50", name: "Paracetamol 250 mg/5 mL (6+)", strengthMgPerMl: 50, meta: { mgkgRange: "10-15", mgkgDefault: 12.5, mgkgMin: 10, mgkgMax: 15, minIntervalHours: 4, maxDosesPerDay: 6, maxPerKgPerDay: 60, maxPerDayMg: 4000, notes: "10–15 mg/kg/ครั้ง q4–6h; ไม่เกิน 60 mg/kg/วัน หรือ 4 g/วัน" } },
+  { id: "ibu-20", name: "Ibuprofen Syrup 100 mg/5 mL", strengthMgPerMl: 20, meta: { mgkgRange: "5-10", mgkgDefault: 7.5, mgkgMin: 5, mgkgMax: 10, minIntervalHours: 6, maxDosesPerDay: 4, maxPerKgPerDay: 40, notes: "5–10 mg/kg/ครั้ง q6–8h; ไม่เกิน 40 mg/kg/วัน" } },
+  { id: "amox125-25", name: "Amoxicillin 125 mg/5 mL", strengthMgPerMl: 25, meta: { mgkgRange: "6.7-16.7", mgkgDefault: 12.5, mgkgMin: 6.7, mgkgMax: 16.7, minIntervalHours: 8, notes: "6.7–16.7 mg/kg/ครั้ง q8h", warning: "คำเตือนสำคัญ — Amoxicillin อาจทำให้ท้องเสีย/ผื่น; หากสงสัยแพ้ให้หยุดใช้และพบแพทย์" } },
+  { id: "cet-1", name: "Cetirizine 5 mg/5 mL", strengthMgPerMl: 1, meta: { mgkgRange: "0.25", mgkgDefault: 0.25, mgkgMin: 0.25, mgkgMax: 0.25, minIntervalHours: 24, maxPerDayMg: 10, notes: "0.25 mg/kg/วัน q24h; ไม่เกิน 10 mg/วัน" } },
+
+  // --- เพิ่มรายการตั้งต้นมากกว่า 5 รายการ ---
+  { id: "amox250-50", name: "Amoxicillin 250 mg/5 mL", strengthMgPerMl: 50, meta: { mgkgRange: "6.7-16.7", mgkgDefault: 12.5, mgkgMin: 6.7, mgkgMax: 16.7, minIntervalHours: 8, notes: "6.7–16.7 mg/kg/ครั้ง q8h" } },
+  { id: "augmentin228-amox200-40", name: "Augmentin 228.5 mg/5 mL (Amox 200 mg/5 mL)", strengthMgPerMl: 40, meta: { mgkgRange: "25-45", mgkgDefault: 40, minIntervalHours: 8, notes: "คำนวณตามส่วน Amoxicillin 200 mg/5 mL (≈40 mg/mL)" } },
+  { id: "cefaclor125-25", name: "Cefaclor 125 mg/5 mL", strengthMgPerMl: 25, meta: { mgkgRange: "7-15", mgkgDefault: 10, minIntervalHours: 8 } },
+  { id: "cephalexin125-25", name: "Cephalexin 125 mg/5 mL", strengthMgPerMl: 25, meta: { mgkgRange: "12.5-25", mgkgDefault: 20, minIntervalHours: 6 } },
+  { id: "cefdinir125-25", name: "Cefdinir (Omnicef) 125 mg/5 mL", strengthMgPerMl: 25, meta: { mgkgRange: "7-14", mgkgDefault: 10, minIntervalHours: 12 } },
+  { id: "cotri-tmp40-8", name: "Cotrimoxazole (TMP base 40 mg/5 mL)", strengthMgPerMl: 8, meta: { notes: "ระบุ/คำนวณโดยใช้ส่วน TMP base 40 mg/5 mL (≈8 mg/mL)" } },
+  { id: "clarithro125-25", name: "Clarithromycin 125 mg/5 mL", strengthMgPerMl: 25, meta: { mgkgRange: "7.5-15", mgkgDefault: 7.5, minIntervalHours: 12 } },
+  { id: "azithro200-40", name: "Azithromycin 200 mg/5 mL", strengthMgPerMl: 40, meta: { mgkgRange: "10", mgkgDefault: 10, minIntervalHours: 24 } },
+  { id: "ery-ethylsuccinate200-40", name: "Erythromycin E.S. 200 mg/5 mL", strengthMgPerMl: 40, meta: { mgkgRange: "30-50", mgkgDefault: 40, minIntervalHours: 6 } },
+  { id: "pred-5-1", name: "Prednisolone 5 mg/5 mL", strengthMgPerMl: 1, meta: { mgkgRange: "0.5-2", mgkgDefault: 1 } },
+  { id: "pred-15-3", name: "Prednisolone 15 mg/5 mL", strengthMgPerMl: 3, meta: { mgkgRange: "0.5-2", mgkgDefault: 1 } },
+  { id: "domperidone5-1", name: "Domperidone 5 mg/5 mL", strengthMgPerMl: 1 },
+  { id: "loratadine5-1", name: "Loratadine 5 mg/5 mL", strengthMgPerMl: 1 },
+  { id: "diphen12_5-2_5", name: "Diphenhydramine 12.5 mg/5 mL", strengthMgPerMl: 2.5 },
+  { id: "chlorphen-0_4", name: "Chlorpheniramine 2 mg/5 mL", strengthMgPerMl: 0.4 },
+  { id: "dextromethorphan15-3", name: "Dextromethorphan HBr 15 mg/5 mL", strengthMgPerMl: 3 },
+  { id: "pseudoephed30-6", name: "Pseudoephedrine HCl 30 mg/5 mL", strengthMgPerMl: 6 },
+  { id: "salbutamol2-0_4", name: "Salbutamol 2 mg/5 mL", strengthMgPerMl: 0.4 },
+  { id: "ambroxol15-3", name: "Ambroxol 15 mg/5 mL", strengthMgPerMl: 3 },
+  { id: "carbocisteine250-50", name: "Carbocisteine 250 mg/5 mL", strengthMgPerMl: 50 },
+
+  // --- หน่วยพิเศษ ---
+  { id: "procaterol5mcg-0.005", name: "Procaterol HCl Syrup 5 mcg/mL", strengthMgPerMl: 0.005, meta: { displayStrength: "5 mcg/mL", altUnitPerMl: 5, altUnitLabel: "mcg" } },
+  { id: "nystatin-100k", name: "Nystatin Oral Suspension 100,000 units/mL", strengthMgPerMl: 0, meta: { displayStrength: "100,000 units/mL", altUnitPerMl: 100000, altUnitLabel: "units" } }
+];
+
+// ---------------- Storage keys ----------------
+const STORAGE_PRODUCTS_KEY = "nisapharmaSyrupProducts";
+const STORAGE_STATE_KEY   = "nisapharmaSyrupState";
+const STORAGE_STATS_KEY   = "nisapharmaUsageStats";
+
+// ---------------- Helpers ----------------
+function mergeByIdKeepExisting(existing: Product[] = [], samples: Product[] = []) {
+  const map = new Map<string, Product>();
+  for (const p of existing) map.set(p.id, p);
+  for (const s of samples) {
+    if (map.has(s.id)) {
+      const p = map.get(s.id)!;
+      map.set(s.id, { ...p, meta: { ...(s.meta||{}), ...(p.meta||{}) } }); // keep user's, backfill missing
+    } else {
+      map.set(s.id, s);
+    }
+  }
+  return Array.from(map.values());
+}
+
+const toNumber = (v: any): number | undefined => {
+  const n = typeof v === "string" ? v.replace(/,/g, "").trim() : v;
+  const out = parseFloat(n as any);
+  return isNaN(out) ? undefined : out;
+};
+
+const decimalsFromIncrement = (inc?: number) => {
+  if (!isFinite(inc as number)) return 2;
+  const s = String(inc);
+  return s.includes(".") ? s.split(".")[1].length : 0;
+};
+
+const roundToIncrement = (value?: number, inc?: number) => {
+  if (!isFinite(value as number) || !isFinite(inc as number) || (inc as number) <= 0) return value as number;
+  const f = 1 / (inc as number);
+  return Math.round((value as number) * f) / f;
+};
+
+const formatNumber = (n?: number, dp = 2) => {
+  if (!isFinite(n as number)) return "-";
+  return (n as number).toLocaleString(undefined, { maximumFractionDigits: dp, minimumFractionDigits: 0 });
+};
+
+const asGIfWholeGrams = (mg?: number) => {
+  if (!isFinite(mg as number)) return undefined;
+  const g = (mg as number) / 1000;
+  return Math.abs(g - Math.round(g)) < 1e-9 ? `${Math.round(g)} g` : undefined;
+};
+
+const buildNoteFromMeta = (meta?: Product["meta"]) => {
+  if (!meta) return undefined;
+  const range = meta.mgkgMin != null && meta.mgkgMax != null
+    ? `${meta.mgkgMin}–${meta.mgkgMax} mg/kg/ครั้ง`
+    : (meta.mgkgRange ? `${meta.mgkgRange} mg/kg/ครั้ง` : undefined);
+  const q = meta.minIntervalHours ? `q${meta.minIntervalHours}h` : undefined;
+  const caps: string[] = [];
+  if (isFinite(meta.maxPerKgPerDay)) caps.push(`${meta.maxPerKgPerDay} mg/kg/วัน`);
+  if (isFinite(meta.maxPerDayMg)) caps.push(asGIfWholeGrams(meta.maxPerDayMg) || `${meta.maxPerDayMg} mg/วัน`);
+  const left = [range, q].filter(Boolean).join(" ");
+  const right = caps.length ? `ไม่เกิน ${caps.join(" หรือ ")}` : undefined;
+  return [left, right].filter(Boolean).join("; ");
+};
+
+// Added: helper to derive when an item was added (for "recent" sorting)
+function getAddedAt(p: Product): number {
+  const a = (p.meta as any)?.addedAt;
+  if (typeof a === 'number' && isFinite(a)) return a;
+  const parts = (p.id||'').split('-');
+  const last = parts[parts.length-1] || '';
+  const n = parseInt(last, 36);
+  return isNaN(n) ? 0 : n;
+}
+
+// ---------------- UI atoms ----------------
+const Section: React.FC<{ title: React.ReactNode; right?: React.ReactNode; className?: string }>
+= ({ title, right, className, children }) => (
+  <div className={`rounded-2xl bg-white/90 shadow-sm ring-1 ring-emerald-200 p-5 md:p-6 ${className||""}`}>
+    <div className="flex items-center justify-between gap-3 mb-2">
+      <h2 className="text-emerald-900 font-semibold tracking-tight text-xl">{title}</h2>
+      {right}
+    </div>
+    {children}
+  </div>
+);
+
+const Label: React.FC<{ htmlFor?: string }> = ({ htmlFor, children }) => (
+  <label htmlFor={htmlFor} className="block text-[15px] font-semibold text-emerald-900/90 mb-2">{children}</label>
+);
+
+const Input: React.FC<{ id?: string; type?: string; value?: any; onChange?: (v:any)=>void; placeholder?: string; step?: string; min?: string; max?: string }>
+= ({ id, type="number", value, onChange, placeholder, step, min, max }) => (
+  <input id={id} type={type} value={value ?? ""} onChange={(e)=>onChange?.(e.target.value)} placeholder={placeholder} step={step} min={min} max={max}
+    className="w-full h-11 rounded-2xl border border-emerald-200 bg-white px-4 py-3 text-base text-emerald-950 placeholder-emerald-400 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400/60" />
+);
+
+const Textarea: React.FC<{ id?: string; value?: any; onChange?: (v:any)=>void; placeholder?: string; rows?: number }>
+= ({ id, value, onChange, placeholder, rows=3 }) => (
+  <textarea id={id} value={value ?? ""} onChange={(e)=>onChange?.(e.target.value)} placeholder={placeholder} rows={rows}
+    className="w-full rounded-2xl border border-emerald-200 bg-white px-4 py-3 text-base text-emerald-950 placeholder-emerald-400 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400/60" />
+);
+
+const Select: React.FC<{ id?: string; value: any; onChange?: (v:any)=>void }>
+= ({ id, value, onChange, children }) => (
+  <select id={id} value={value} onChange={(e)=>onChange?.(e.target.value)}
+    className="w-full h-10 rounded-2xl border border-emerald-200 bg-white px-4 py-2.5 text-base text-emerald-950 shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-400/60">
+    {children}
+  </select>
+);
+
+const Button: React.FC<{ tone?: "primary"|"soft"|"danger"; type?: "button"|"submit"|"reset"; onClick?: ()=>void }>
+= ({ tone="primary", type="button", onClick, children }) => {
+  const tones: Record<string,string> = {
+    primary: "bg-emerald-600 hover:bg-emerald-700 text-white",
+    soft: "bg-emerald-100 hover:bg-emerald-200 text-emerald-900",
+    danger: "bg-rose-600 hover:bg-rose-700 text-white",
+  };
+  return (
+    <button type={type} onClick={onClick} className={`rounded-2xl px-4 py-2.5 text-[15px] font-semibold shadow-sm transition ${tones[tone]} focus:outline-none focus:ring-2 focus:ring-emerald-400/60`}>
+      {children}
+    </button>
+  );
+};
+
+// ---------------- Main ----------------
+export default function PediatricSyrupDoseCalculator() {
+  const productSectionRef = useRef<HTMLDivElement>(null);
+  const addFormRef = useRef<HTMLDetailsElement>(null);
+  const [online, setOnline] = useState<boolean>(typeof navigator !== "undefined" ? navigator.onLine : true);
+  // Mobile menu state
+  const mobileMenuRef = useRef<HTMLDivElement>(null);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  // Close mobile menu on outside click / ESC
+  useEffect(() => {
+    function onKey(e: KeyboardEvent){ if(e.key === 'Escape') setMobileMenuOpen(false); }
+    function onClick(e: MouseEvent){ if(mobileMenuRef.current && !mobileMenuRef.current.contains(e.target as Node)) setMobileMenuOpen(false); }
+    if (mobileMenuOpen) {
+      document.addEventListener('keydown', onKey);
+      document.addEventListener('click', onClick);
+    }
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('click', onClick);
+    };
+  }, [mobileMenuOpen]);
+
+  useEffect(() => {
+    const on = () => setOnline(true); const off = () => setOnline(false);
+    window.addEventListener("online", on); window.addEventListener("offline", off);
+    return () => { window.removeEventListener("online", on); window.removeEventListener("offline", off); };
+  }, []);
+
+  type Usage = { visitCount: number; calcCount: number };
+  const [usage, setUsage] = useState<Usage>(() => {
+    try { return JSON.parse(localStorage.getItem(STORAGE_STATS_KEY) || "null") || { visitCount: 0, calcCount: 0 }; } catch { return { visitCount: 0, calcCount: 0 }; }
+  });
+  useEffect(() => {
+    try {
+      if (!sessionStorage.getItem("nisapharmaSession")) {
+        sessionStorage.setItem("nisapharmaSession", "1");
+        setUsage(u => ({ ...u, visitCount: (u.visitCount||0) + 1 }));
+      }
+    } catch {}
+  }, []);
+  useEffect(() => { try { localStorage.setItem(STORAGE_STATS_KEY, JSON.stringify(usage)); } catch {} }, [usage]);
+
+  const [products, setProducts] = useState<Product[]>(() => {
+    try {
+      const from = JSON.parse(localStorage.getItem(STORAGE_PRODUCTS_KEY) || "null");
+      if (Array.isArray(from) && from.length) return mergeByIdKeepExisting(from, SAMPLE_PRODUCTS);
+    } catch {}
+    return SAMPLE_PRODUCTS;
+  });
+
+  const [state, setState] = useState<any>(() => {
+    try { const s = JSON.parse(localStorage.getItem(STORAGE_STATE_KEY) || "null"); if (s) return s; } catch {}
+    return {
+      // selection
+      selectedProductId: SAMPLE_PRODUCTS[0].id,
+      productQuery: "",
+      sortMode: "alpha",
+      customStrength: "",
+      // patient
+      weightKg: "",
+      ageYears: "",
+      ageMonths: "",
+      mgPerKgInput: "",
+      mgkgUnit: "mg",
+      doseMlInput: "",
+      roundingInc: "0.1",
+      intervalHours: "8",
+      dosesPerDay: "3",
+      maxPerDayMg: "",
+      maxPerKgPerDay: "",
+      // total
+      daysDuration: "5",
+      bottleSizeMl: "60",
+      // add/edit product
+      addOpen: false,
+      editingProductId: "",
+      addName: "",
+      addStrength: "",
+      addMgkgRange: "",
+      addMgkgDefault: "",
+      addMgkgMin: "",
+      addMgkgMax: "",
+      addMinIntervalHours: "",
+      addMaxDosesPerDay: "",
+      addMaxPerKgDay: "",
+      addMaxPerDayMg: "",
+      addMaxPerDoseMg: "",
+      addNotes: "",
+      addWarning: "",
+      // schedule
+      firstDoseTime: "08:00",
+      // samples
+      samplesOpen: false,
+    };
+  });
+
+  useEffect(() => { try { localStorage.setItem(STORAGE_PRODUCTS_KEY, JSON.stringify(products)); } catch {} }, [products]);
+  useEffect(() => { try { localStorage.setItem(STORAGE_STATE_KEY, JSON.stringify(state)); } catch {} }, [state]);
+
+  // Derived product & filter
+  const filteredProducts = useMemo(() => {
+    const q = (state.productQuery||"").toLowerCase().trim();
+    let list = products;
+    if (q) list = list.filter(p => (p.name + " " + p.strengthMgPerMl).toLowerCase().includes(q));
+    // sort according to mode
+    if (state.sortMode === 'recent') {
+      return [...list].sort((a,b)=> (getAddedAt(b) - getAddedAt(a)) || a.name.localeCompare(b.name, undefined, {sensitivity:'base', numeric:true}));
+    }
+    return [...list].sort((a,b)=> a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }));
+  }, [products, state.productQuery, state.sortMode]);
+
+  const selectedProduct = products.find(p => p.id === state.selectedProductId);
+  const strengthMgPerMl = useMemo(() => {
+    const custom = toNumber(state.customStrength);
+    if (isFinite(custom as number)) return custom as number;
+    return selectedProduct?.strengthMgPerMl;
+  }, [selectedProduct, state.customStrength]);
+
+  const selectedNote = useMemo(() => selectedProduct?.meta?.notes || buildNoteFromMeta(selectedProduct?.meta), [selectedProduct]);
+
+  // Sync dosesPerDay ↔ interval
+  useEffect(() => {
+    const h = toNumber(state.intervalHours);
+    if (isFinite(h as number) && (h as number) > 0) {
+      const calc = 24 / (h as number);
+      if (Math.abs(calc - (toNumber(state.dosesPerDay) as number)) > 1e-4) setState((s:any)=>({ ...s, dosesPerDay: String(+calc.toFixed(4)) }));
+    }
+  }, [state.intervalHours]);
+  useEffect(() => {
+    const d = toNumber(state.dosesPerDay);
+    if (isFinite(d as number) && (d as number) > 0) {
+      const calc = 24 / (d as number);
+      if (Math.abs(calc - (toNumber(state.intervalHours) as number)) > 1e-4) setState((s:any)=>({ ...s, intervalHours: String(+calc.toFixed(4)) }));
+    }
+  }, [state.dosesPerDay]);
+
+  // Calculations
+  const weightKg = toNumber(state.weightKg);
+  const mgPerKgDesired = toNumber(state.mgPerKgInput);
+  const mgkgUnit = state.mgkgUnit || "mg";
+  const altUnitPerMl = selectedProduct?.meta?.altUnitPerMl;
+  const altUnitLabel = selectedProduct?.meta?.altUnitLabel;
+  const doseUnitLabel = mgkgUnit === 'IU' ? 'IU' : (mgkgUnit === 'units' ? (altUnitLabel||'units') : mgkgUnit);
+  const dosePerKgInput = toNumber(state.mgPerKgInput);
+  const mlPerDoseInput = toNumber(state.doseMlInput);
+  const roundingInc = toNumber(state.roundingInc) ?? 0.1;
+  const dosesPerDay = toNumber(state.dosesPerDay);
+  const daysDuration = toNumber(state.daysDuration);
+  const bottleSizeMl = toNumber(state.bottleSizeMl);
+  const maxPerDayMg = toNumber(state.maxPerDayMg);
+  const maxPerKgPerDay = toNumber(state.maxPerKgPerDay);
+
+  const mlFromKgUnit = useMemo(() => {
+    if (!isFinite(dosePerKgInput as number) || !isFinite(weightKg as number)) return undefined;
+    if (mgkgUnit === 'mg') {
+      if (!isFinite(strengthMgPerMl as number) || (strengthMgPerMl as number) === 0) return undefined;
+      return ((dosePerKgInput as number) * (weightKg as number)) / (strengthMgPerMl as number);
+    }
+    if (mgkgUnit === 'mcg') {
+      if (!isFinite(strengthMgPerMl as number) || (strengthMgPerMl as number) === 0) return undefined;
+      const mgPerKg = (dosePerKgInput as number) / 1000;
+      return (mgPerKg * (weightKg as number)) / (strengthMgPerMl as number);
+    }
+    if (!isFinite(altUnitPerMl as number) || (altUnitPerMl as number) === 0) return undefined;
+    return ((dosePerKgInput as number) * (weightKg as number)) / (altUnitPerMl as number);
+  }, [dosePerKgInput, mgkgUnit, weightKg, strengthMgPerMl, altUnitPerMl]);
+
+  const mlPerDoseRaw = isFinite(mlPerDoseInput as number) ? (mlPerDoseInput as number) : mlFromKgUnit;
+  const mlPerDoseRounded = useMemo(() => !isFinite(mlPerDoseRaw as number) ? undefined : roundToIncrement(mlPerDoseRaw as number, roundingInc as number), [mlPerDoseRaw, roundingInc]);
+  const mgPerDose = useMemo(() => (!isFinite(mlPerDoseRounded as number) || !isFinite(strengthMgPerMl as number)) ? undefined : (mlPerDoseRounded as number) * (strengthMgPerMl as number), [mlPerDoseRounded, strengthMgPerMl]);
+  // Selected-unit per-dose/per-kg/per-day
+  const perDoseSelectedUnit = useMemo(() => {
+    if (!isFinite(mlPerDoseRounded as number)) return undefined;
+    if (mgkgUnit === 'mg' || mgkgUnit === 'mcg') {
+      if (!isFinite(strengthMgPerMl as number)) return undefined;
+      const mg = (mlPerDoseRounded as number) * (strengthMgPerMl as number);
+      return mgkgUnit === 'mg' ? mg : mg * 1000;
+    }
+    if (!isFinite(altUnitPerMl as number)) return undefined;
+    return (mlPerDoseRounded as number) * (altUnitPerMl as number);
+  }, [mlPerDoseRounded, mgkgUnit, strengthMgPerMl, altUnitPerMl]);
+  const perKgSelectedUnit = useMemo(() => (!isFinite(perDoseSelectedUnit as number) || !isFinite(weightKg as number) || (weightKg as number) === 0) ? undefined : (perDoseSelectedUnit as number) / (weightKg as number), [perDoseSelectedUnit, weightKg]);
+  const perDaySelectedUnit = useMemo(() => (!isFinite(perDoseSelectedUnit as number) || !isFinite(dosesPerDay as number)) ? undefined : (perDoseSelectedUnit as number) * (dosesPerDay as number), [perDoseSelectedUnit, dosesPerDay]);
+  const mgPerKgActual = useMemo(() => (!isFinite(mgPerDose as number) || !isFinite(weightKg as number) || (weightKg as number) === 0) ? undefined : (mgPerDose as number) / (weightKg as number), [mgPerDose, weightKg]);
+  const mgPerDay = useMemo(() => (!isFinite(mgPerDose as number) || !isFinite(dosesPerDay as number)) ? undefined : (mgPerDose as number) * (dosesPerDay as number), [mgPerDose, dosesPerDay]);
+  const totalVolumeMl = useMemo(() => (!isFinite(mlPerDoseRounded as number) || !isFinite(dosesPerDay as number) || !isFinite(daysDuration as number)) ? undefined : (mlPerDoseRounded as number) * (dosesPerDay as number) * (daysDuration as number), [mlPerDoseRounded, dosesPerDay, daysDuration]);
+  const bottlesNeeded = useMemo(() => (!isFinite(totalVolumeMl as number) || !isFinite(bottleSizeMl as number) || (bottleSizeMl as number) <= 0) ? undefined : Math.ceil((totalVolumeMl as number) / (bottleSizeMl as number)), [totalVolumeMl, bottleSizeMl]);
+
+  const exceedsMaxMgDay = useMemo(() => (!isFinite(mgPerDay as number) || !isFinite(maxPerDayMg as number)) ? false : (mgPerDay as number) > (maxPerDayMg as number), [mgPerDay, maxPerDayMg]);
+  const exceedsMaxMgKgDay = useMemo(() => (!isFinite(mgPerKgActual as number) || !isFinite(dosesPerDay as number) || !isFinite(maxPerKgPerDay as number)) ? false : ((mgPerKgActual as number) * (dosesPerDay as number)) > (maxPerKgPerDay as number), [mgPerKgActual, dosesPerDay, maxPerKgPerDay]);
+
+  const crossCheckNote = useMemo(() => {
+    // show only when BOTH mg/kg input AND mL/dose are filled (plus weight) and difference exceeds rounding step
+    if (!isFinite(dosePerKgInput as number) || !isFinite(mlPerDoseInput as number) || !isFinite(weightKg as number)) return null;
+    const expectedMl = mlFromKgUnit;
+    if (!isFinite(expectedMl as number)) return null;
+    const diff = Math.abs((expectedMl as number) - (mlPerDoseInput as number));
+    if (diff > ((roundingInc as number) || 0.1)) return `คำเตือน: mL/dose ที่กรอก (${mlPerDoseInput}) ไม่สอดคล้องกับค่าที่คำนวณจาก ${doseUnitLabel}/kg (${(expectedMl as number).toFixed(2)} mL) ก่อนปัดเศษ`;
+    return null;
+  }, [dosePerKgInput, mlPerDoseInput, weightKg, mlFromKgUnit, roundingInc, doseUnitLabel]);
+
+  // Increase calc counter whenever a new valid result appears
+  const lastSigRef = useRef<string>("");
+  useEffect(() => {
+    const sig = JSON.stringify({ mlPerDoseRounded, strengthMgPerMl, roundingInc, weightKg, mgPerKgDesired, mlPerDoseInput });
+    if (isFinite(mlPerDoseRounded as number) && sig !== lastSigRef.current) {
+      lastSigRef.current = sig; setUsage(u => ({ ...u, calcCount: (u.calcCount||0) + 1 }));
+    }
+  }, [mlPerDoseRounded, strengthMgPerMl, roundingInc, weightKg, mgPerKgDesired, mlPerDoseInput]);
+
+  const dpForMl = decimalsFromIncrement((roundingInc as number) || 0.1);
+
+  // Schedule utilities
+  function computeDaySchedule(startHHMM?: string, intervalH?: number, count?: number): string[] {
+    const h = toNumber(intervalH); const c = Math.max(0, Math.floor(toNumber(count) || 0));
+    if (!startHHMM || !isFinite(h as number) || (h as number) <= 0 || c === 0) return [];
+    const [hh, mm] = (startHHMM||"").split(":").map(x=>parseInt(x,10)); if (!isFinite(hh as number) || !isFinite(mm as number)) return [];
+    const step = Math.round((h as number) * 60); const out: string[] = []; let minutes = hh*60+mm;
+    for (let i=0;i<c;i++){ const m=((minutes%(24*60))+(24*60))%(24*60); const H=Math.floor(m/60); const M=m%60; out.push(`${String(H).padStart(2,"0")}:${String(M).padStart(2,"0")}`); minutes+=step; }
+    return out;
+  }
+
+  function buildCopySummary(): string {
+    const lines: string[] = [];
+    const p = selectedProduct;
+    lines.push(`ชื่อยา: ${p ? p.name : "-"}`);
+    lines.push(`ความแรง: ${(() => { const ds = (mgkgUnit==='mg' || mgkgUnit==='mcg' || !isFinite(altUnitPerMl as number)) ? (isFinite(strengthMgPerMl as number) ? `${strengthMgPerMl} mg/mL` : '-') : `${altUnitPerMl} ${(altUnitLabel||'units')}/mL`; return ds; })()}`);
+    lines.push(`ขนาด: ${isFinite(mlPerDoseRounded as number) ? (mlPerDoseRounded as number).toFixed(dpForMl) : "-"} mL/dose`);
+    lines.push(`เท่ากับ: ${isFinite(perDoseSelectedUnit as number) ? formatNumber(perDoseSelectedUnit as number, 2) : "-"} ${doseUnitLabel}/dose`);
+    lines.push(`เว้น: ${isFinite(toNumber(state.intervalHours) as number) ? `${(+state.intervalHours).toFixed(2)} ชม.` : "-"}`);
+    lines.push(`ครั้ง/วัน: ${isFinite(dosesPerDay as number) ? dosesPerDay : "-"}`);
+    lines.push(`ระยะวัน: ${isFinite(daysDuration as number) ? daysDuration : "-"} วัน`);
+    if (selectedProduct?.meta?.warning) lines.push(`คำเตือนสำคัญ: ${selectedProduct.meta.warning}`);
+    if (selectedNote) lines.push(`หมายเหตุ: ${selectedNote}`);
+    lines.push(`ปริมาตรรวม: ${isFinite(totalVolumeMl as number) ? formatNumber(totalVolumeMl as number, dpForMl) : "-"} mL${isFinite(bottlesNeeded as number) ? ` (≈ ${bottlesNeeded} ขวด @ ${bottleSizeMl} mL)` : ""}`);
+    const times = computeDaySchedule(state.firstDoseTime, toNumber(state.intervalHours), Math.max(1, Math.floor(toNumber(state.dosesPerDay) || 0)));
+    if (times.length) lines.push(`เวลาให้ยาวันแรก: ${times.join(" • ")}`);
+    return lines.join("\n");
+  }
+
+  async function copySummaryToClipboard() {
+    const text = buildCopySummary();
+    try { await navigator.clipboard.writeText(text); alert("คัดลอกสรุปแล้ว"); return; } catch {}
+    try {
+      const ta = document.createElement("textarea"); ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0"; ta.style.left = "-9999px"; document.body.appendChild(ta);
+      ta.focus(); ta.select(); const ok = document.execCommand("copy"); document.body.removeChild(ta);
+      alert(ok ? "คัดลอกสรุปแล้ว" : "คัดลอกไม่สำเร็จ — คัดลอกเองจากกล่องสรุปได้");
+    } catch { alert("คัดลอกไม่สำเร็จ — คัดลอกเองจากกล่องสรุปได้"); }
+  }
+
+  function selectProduct(id: string, scroll?: boolean) {
+    setState((s:any)=>({ ...s, selectedProductId: id, customStrength: "" }));
+    if (scroll) productSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function clearPatientInputs() {
+    setState((s:any)=>({ ...s, weightKg: "", ageYears: "", ageMonths: "", mgPerKgInput: "", doseMlInput: "", intervalHours: "", dosesPerDay: "", maxPerDayMg: "", maxPerKgPerDay: "" }));
+  }
+
+  function upsertProductFromForm() {
+    const name = (state.addName||"").trim(); const s = toNumber(state.addStrength);
+    if (!name || !isFinite(s as number) || (s as number) <= 0) { alert("กรุณากรอก 'ชื่อ' และ 'ความแรง (mg/mL)' ให้ถูกต้อง"); return; }
+    const meta: any = {};
+    const mgmin = toNumber(state.addMgkgMin); const mgmax = toNumber(state.addMgkgMax);
+    if (isFinite(mgmin as number)) meta.mgkgMin = mgmin; if (isFinite(mgmax as number)) meta.mgkgMax = mgmax;
+    if ((state.addMgkgRange||"").trim()) meta.mgkgRange = (state.addMgkgRange||"").trim();
+    const mgkgDefault = toNumber(state.addMgkgDefault); if (isFinite(mgkgDefault as number)) meta.mgkgDefault = mgkgDefault;
+    const minInt = toNumber(state.addMinIntervalHours); if (isFinite(minInt as number)) meta.minIntervalHours = minInt;
+    const maxDoses = toNumber(state.addMaxDosesPerDay); if (isFinite(maxDoses as number)) meta.maxDosesPerDay = maxDoses;
+    const maxKgDay = toNumber(state.addMaxPerKgDay); if (isFinite(maxKgDay as number)) meta.maxPerKgPerDay = maxKgDay;
+    const maxDayMg = toNumber(state.addMaxPerDayMg); if (isFinite(maxDayMg as number)) meta.maxPerDayMg = maxDayMg;
+    const maxDoseMg = toNumber(state.addMaxPerDoseMg); if (isFinite(maxDoseMg as number)) meta.maxPerDoseMg = maxDoseMg;
+    const notes = (state.addNotes||"").trim(); meta.notes = notes || buildNoteFromMeta(meta);
+    const warning = (state.addWarning||"").trim(); if (warning) meta.warning = warning;
+
+    if (state.editingProductId) {
+      const next = products.map((p)=> p.id === state.editingProductId ? { ...p, name, strengthMgPerMl: s as number, meta } : p);
+      setProducts(next);
+      setState((st:any)=>({ ...st, selectedProductId: state.editingProductId, customStrength: "", addOpen:false, editingProductId:"", addName:"", addStrength:"", addMgkgRange:"", addMgkgDefault:"", addMgkgMin:"", addMgkgMax:"", addMinIntervalHours:"", addMaxDosesPerDay:"", addMaxPerKgDay:"", addMaxPerDayMg:"", addMaxPerDoseMg:"", addNotes:"", addWarning:"" }));
+      return;
+    }
+
+    const id = `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0,24)}-${Date.now().toString(36)}`;
+    (meta as any).addedAt = Date.now();
+    setProducts([...products, { id, name, strengthMgPerMl: s as number, meta }]);
+    setState((st:any)=>({ ...st, selectedProductId: id, customStrength: "", addOpen:false, editingProductId:"", addName:"", addStrength:"", addMgkgRange:"", addMgkgDefault:"", addMgkgMin:"", addMgkgMax:"", addMinIntervalHours:"", addMaxDosesPerDay:"", addMaxPerKgDay:"", addMaxPerDayMg:"", addMaxPerDoseMg:"", addNotes:"", addWarning:"" }));
+  }
+
+  function removeProductById(id:string){
+    const p = products.find(x=>x.id===id); if(!p) return;
+    if(!confirm(`ลบผลิตภัณฑ์ "${p.name}" ?`)) return;
+    const next = products.filter(x=>x.id!==id); setProducts(next.length?next:SAMPLE_PRODUCTS);
+    setState((st:any)=>({ ...st, selectedProductId: (next[0]?.id || SAMPLE_PRODUCTS[0].id), customStrength:"" }));
+  }
+
+  function startEditProduct(p: Product){
+    setState((st:any)=>({
+      ...st,
+      addOpen:true,
+      editingProductId:p.id,
+      addName:p.name,
+      addStrength:String(p.strengthMgPerMl||""),
+      addMgkgRange:p.meta?.mgkgRange||"",
+      addMgkgDefault:p.meta?.mgkgDefault!=null?String(p.meta.mgkgDefault):"",
+      addMgkgMin:p.meta?.mgkgMin!=null?String(p.meta.mgkgMin):"",
+      addMgkgMax:p.meta?.mgkgMax!=null?String(p.meta.mgkgMax):"",
+      addMinIntervalHours:p.meta?.minIntervalHours!=null?String(p.meta.minIntervalHours):"",
+      addMaxDosesPerDay:p.meta?.maxDosesPerDay!=null?String(p.meta.maxDosesPerDay):"",
+      addMaxPerKgDay:p.meta?.maxPerKgPerDay!=null?String(p.meta.maxPerKgPerDay):"",
+      addMaxPerDayMg:p.meta?.maxPerDayMg!=null?String(p.meta.maxPerDayMg):"",
+      addMaxPerDoseMg:p.meta?.maxPerDoseMg!=null?String(p.meta.maxPerDoseMg):"",
+      addNotes:p.meta?.notes||buildNoteFromMeta(p.meta)||"",
+      addWarning:p.meta?.warning||""
+    }));
+    // Ensure the form opens & focus the name field for immediate editing
+    requestAnimationFrame(() => {
+      try {
+        if (addFormRef.current && !addFormRef.current.open) addFormRef.current.open = true;
+        addFormRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        const nameEl = document.getElementById("addName") as HTMLInputElement | null;
+        nameEl?.focus();
+        nameEl?.select?.();
+      } catch {}
+    });
+  }
+
+  function restoreSamples(){ if(!confirm("กู้คืนรายการตัวอย่างเริ่มต้นทั้งหมด? รายการที่เพิ่มเองจะไม่ถูกเก็บไว้")) return; setProducts(SAMPLE_PRODUCTS); setState((s:any)=>({ ...s, selectedProductId:SAMPLE_PRODUCTS[0].id, customStrength:"" })); }
+  function resetAll(){ if(!confirm("รีเซ็ตค่าทั้งหมดเป็นค่าเริ่มต้น?")) return; localStorage.removeItem(STORAGE_PRODUCTS_KEY); localStorage.removeItem(STORAGE_STATE_KEY); localStorage.removeItem(STORAGE_STATS_KEY); setProducts(SAMPLE_PRODUCTS); setState((s:any)=>({ ...s, selectedProductId:SAMPLE_PRODUCTS[0].id, productQuery:"", customStrength:"", weightKg:"", ageYears:"", ageMonths:"", mgPerKgInput:"", doseMlInput:"", roundingInc:"0.1", intervalHours:"8", dosesPerDay:"3", maxPerDayMg:"", maxPerKgPerDay:"", daysDuration:"5", bottleSizeMl:"60", addOpen:false, editingProductId:"", addName:"", addStrength:"", addMgkgRange:"", addMgkgDefault:"", addMgkgMin:"", addMgkgMax:"", addMinIntervalHours:"", addMaxDosesPerDay:"", addMaxPerKgDay:"", addMaxPerDayMg:"", addMaxPerDoseMg:"", addNotes:"", addWarning:"", firstDoseTime:"08:00", mgkgUnit:"mg" })); }
+
+  // -------- Self tests (keep existing + add a few) --------
+  useEffect(() => {
+    // Existing tests (UNCHANGED)
+    const ml = roundToIncrement(5,0.1); const mg = (ml as number)*24; const mgkg = (mg as number)/12; const d=24/8; const day=(mg as number)*d;
+    console.assert(ml===5 && mg===120 && Math.abs(mgkg-10)<1e-9 && d===3 && day===360, "Test1 math ok");
+    const ml2 = roundToIncrement((10*20)/24,0.1); console.assert(Math.abs((ml2 as number)-8.3)<1e-9, "Test2 rounding ok");
+    console.assert(decimalsFromIncrement(0.5)===1, "Test3 dp");
+    console.assert(toNumber("1,234.5")===1234.5, "Test4 toNumber");
+    const note = buildNoteFromMeta({ mgkgMin:10, mgkgMax:15, minIntervalHours:4, maxPerDayMg:4000, maxPerKgPerDay:60 });
+    console.assert(note?.includes("ไม่เกิน"), "Test5 note caps");
+
+    // Additional tests (NEW)
+    const sched = computeDaySchedule("08:00", 8, 3);
+    console.assert(JSON.stringify(sched) === JSON.stringify(["08:00","16:00","00:00"]), "Test6 schedule wrap");
+    const noteG = buildNoteFromMeta({ maxPerDayMg: 2000 });
+    console.assert((noteG||"").includes("2 g") || (noteG||"").includes("2000 mg"), "Test7 grams rendering");
+    const merged = mergeByIdKeepExisting([{id:"a",name:"X",strengthMgPerMl:1,meta:{notes:"u"}} as Product],[{id:"a",name:"X",strengthMgPerMl:1,meta:{mgkgRange:"1"}}]);
+    console.assert(merged[0].meta?.notes==="u" && merged[0].meta?.mgkgRange==="1", "Test8 merge keeps user and backfills");
+    // Unit conversion checks
+    const mgFromMcg = 2500/1000; console.assert(Math.abs(mgFromMcg-2.5) < 1e-9, "Test9 mcg->mg conversion");
+    const unitsMl = (100000*5)/100000; console.assert(unitsMl===5, "Test10 units/ml calc");
+    // Extra rounding & guard tests
+    console.assert(roundToIncrement(1.24,0.2)===1.2, "Test11 rounding 0.2 step");
+    console.assert(JSON.stringify(computeDaySchedule("08:00", -1, 3)) === JSON.stringify([]), "Test12 schedule invalid interval");
+    // Sorting helper tests
+    console.assert(getAddedAt({id:"pcm-24",name:"X",strengthMgPerMl:1} as any) >= 0, "Test13 addedAt fallback ok");
+    const newer = {id:`y-${Date.now().toString(36)}`, name:"Y", strengthMgPerMl:1} as any;
+    const older = {id:"z-24", name:"Z", strengthMgPerMl:1} as any;
+    console.assert(getAddedAt(newer) >= getAddedAt(older), "Test14 recent comparator");
+    // Delete helper sanity
+    const arr=[{id:'a'},{id:'b'},{id:'c'}]; const del=(list:any[],id:string)=>list.filter(x=>x.id!==id);
+    console.assert(JSON.stringify(del(arr,'b'))===JSON.stringify([{id:'a'},{id:'c'}]), 'Test15 delete by id');
+  }, []);
+
+  // ---------------- UI ----------------
+  return (
+    <div className="min-h-screen w-full bg-gradient-to-br from-emerald-50 via-emerald-100 to-emerald-50 text-emerald-950">
+      {/* Header (not sticky) */}
+      <header className="border-b border-emerald-200 bg-white/70">
+        <div className="mx-auto max-w-screen-2xl px-4 py-3 flex items-center gap-3">
+          <div className="flex flex-col">
+            <div className="text-3xl md:text-4xl font-black tracking-tight text-emerald-700">NISAPHARMA</div>
+            <div className="text-sm md:text-base font-semibold text-emerald-900">คำนวนยาน้ำเชื่อม</div>
+          </div>
+          <div className="ml-auto flex items-center gap-2">
+            {/* Stats (desktop only) */}
+            <div className="hidden sm:flex items-center gap-2 rounded-xl bg-emerald-100/60 border border-emerald-300 px-3 py-1.5 text-xs text-emerald-900">
+              <span className={`${online?"bg-emerald-600":"bg-rose-500"} h-2 w-2 rounded-full`}></span>
+              <span>{online?"ออนไลน์":"ออฟไลน์"}</span>
+              <span className="mx-1">•</span>
+              <span>เข้าชม {usage.visitCount}</span>
+              <span className="mx-1">•</span>
+              <span>คำนวณ {usage.calcCount}</span>
+            </div>
+            {/* Action buttons (desktop) */}
+            <div className="hidden sm:flex items-center gap-2">
+              <Button tone="soft" onClick={()=>setState((s:any)=>({...s, samplesOpen:!s.samplesOpen}))}>{state.samplesOpen?"ซ่อนรายการ":"รายการตัวอย่าง"}</Button>
+              <Button tone="soft" onClick={restoreSamples}>กู้คืนรายการตัวอย่าง</Button>
+              <Button tone="danger" onClick={resetAll}>รีเซ็ตทั้งหมด</Button>
+            </div>
+            {/* Mobile menu */}
+            <div className="sm:hidden relative" ref={mobileMenuRef}>
+              <Button tone="soft" onClick={()=>setMobileMenuOpen(v=>!v)}>เมนู</Button>
+              {mobileMenuOpen && (
+                <div className="absolute right-0 mt-2 w-64 rounded-2xl border border-emerald-200 bg-white shadow-lg z-20">
+                  <div className="px-3 py-2 text-xs text-emerald-800 border-b border-emerald-100 flex items-center gap-2">
+                    <span className={`${online?"bg-emerald-600":"bg-rose-500"} h-2 w-2 rounded-full`}></span>
+                    <span>{online?"ออนไลน์":"ออฟไลน์"}</span>
+                    <span className="mx-1">•</span>
+                    <span>เข้าชม {usage.visitCount}</span>
+                    <span className="mx-1">•</span>
+                    <span>คำนวณ {usage.calcCount}</span>
+                  </div>
+                  <div className="p-2 flex flex-col gap-2">
+                    <Button tone="soft" onClick={()=>{setState((s:any)=>({...s, samplesOpen:!s.samplesOpen})); setMobileMenuOpen(false);}}>{state.samplesOpen?"ซ่อนรายการ":"รายการตัวอย่าง"}</Button>
+                    <Button tone="soft" onClick={()=>{restoreSamples(); setMobileMenuOpen(false);}}>กู้คืนรายการตัวอย่าง</Button>
+                    <Button tone="danger" onClick={()=>{resetAll(); setMobileMenuOpen(false);}}>รีเซ็ตทั้งหมด</Button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main className="mx-auto max-w-screen-2xl px-4 py-6 grid grid-cols-1 lg:grid-cols-2 gap-x-8 gap-y-5">
+        {/* Left column: Product -> Patient -> Results -> Total */}
+        <div className="col-span-1 flex flex-col gap-5">
+          {/* 1) Product selector (LEFT, TOP) */}
+          <div ref={productSectionRef}>
+            <Section title="1) เลือกผลิตภัณฑ์ / ความแรง (mg/mL)">
+              <div className="grid grid-cols-12 gap-3">
+                <div className="col-span-12 md:col-span-8">
+                  <Label htmlFor="product">ผลิตภัณฑ์</Label>
+                  <Select id="product" value={state.selectedProductId} onChange={(v)=>selectProduct(v, true)}>
+                    {filteredProducts.length ? filteredProducts.map(p => (
+                      <option key={p.id} value={p.id}>{p.name} — {p.strengthMgPerMl} mg/mL</option>
+                    )) : <option disabled>ไม่พบรายการที่ตรงกับ "{state.productQuery}"</option>}
+                  </Select>
+                </div>
+                <div className="col-span-12 md:col-span-4">
+                  <Label htmlFor="strength">ความแรง (mg/mL)</Label>
+                  <Input id="strength" value={state.customStrength} onChange={(v)=>setState((s:any)=>({...s, customStrength:v}))} placeholder={String(selectedProduct?.strengthMgPerMl||"")} step="0.1" min="0" />
+                  <p className="text-xs text-emerald-600 mt-1">ปล่อยว่างเพื่อใช้ค่าจากรายการผลิตภัณฑ์</p>
+                </div>
+              </div>
+
+              <div className="mt-3"></div>
+              <Label htmlFor="productSearch">ค้นหาผลิตภัณฑ์</Label>
+              <div className="flex gap-2">
+                <Input id="productSearch" type="text" value={state.productQuery} onChange={(v)=>setState((s:any)=>({...s, productQuery:v}))} placeholder="พิมพ์ชื่อยาแล้วกด Enter หรือกดปุ่มค้นหา" />
+                <Button tone="soft" onClick={()=>setState((s:any)=>({...s, productQuery:s.productQuery}))}>ค้นหา</Button>
+              </div>
+              <div className="text-xs text-emerald-700 mt-1">เคล็ดลับ: กด Enter เพื่อกรองรายชื่อด้านบนอย่างรวดเร็ว</div>
+
+              {selectedProduct && selectedNote && (
+                <div className="mt-3 mb-2 rounded-2xl border-2 border-emerald-400/70 bg-emerald-50 p-4">
+                  <div className="flex items-start gap-3">
+                    <div className="shrink-0 h-6 w-6 rounded-full bg-emerald-500 text-white flex items-center justify-center text-sm font-bold">i</div>
+                    <div className="flex-1 text-sm leading-relaxed">
+                      <div className="font-semibold text-emerald-900">หมายเหตุยา — {selectedProduct.name}</div>
+                      <div className="text-emerald-800">{selectedNote}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+              {selectedProduct?.meta?.warning && (
+                <div className="mb-3 rounded-2xl border-2 border-rose-300 bg-rose-50 p-4">
+                  <div className="flex items-start gap-3">
+                    <div className="shrink-0 h-6 w-6 rounded-full bg-rose-600 text-white flex items-center justify-center text-sm font-bold">!</div>
+                    <div className="flex-1 text-sm leading-relaxed">
+                      <div className="font-semibold text-rose-800">คำเตือนสำคัญ — {selectedProduct.name}</div>
+                      <div className="text-rose-900">{selectedProduct.meta.warning}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </Section>
+          </div>
+
+          {/* 2) ข้อมูลผู้ป่วย */}
+          <Section title="2) ข้อมูลผู้ป่วย" right={<Button tone="soft" onClick={clearPatientInputs}>ล้างข้อมูลผู้ป่วย</Button>}>
+            <div className="grid grid-cols-12 gap-3">
+              <div className="col-span-12 md:col-span-4"><Label htmlFor="weight">น้ำหนัก (kg)</Label><Input id="weight" value={state.weightKg} onChange={(v)=>setState((s:any)=>({...s, weightKg:v}))} step="0.1" min="0" /></div>
+              <div className="col-span-12 md:col-span-4"><Label htmlFor="ageY">อายุ (ปี)</Label><Input id="ageY" value={state.ageYears} onChange={(v)=>setState((s:any)=>({...s, ageYears:v}))} type="number" step="1" min="0" /></div>
+              <div className="col-span-12 md:col-span-4"><Label htmlFor="ageM">อายุ (เดือน)</Label><Input id="ageM" value={state.ageMonths} onChange={(v)=>setState((s:any)=>({...s, ageMonths:v}))} type="number" step="1" min="0" /></div>
+            </div>
+            <div className="grid grid-cols-12 gap-3 mt-2">
+              <div className="col-span-12 md:col-span-3"><Label htmlFor="mgkg">ขนาด ({state.mgkgUnit}/kg/ครั้ง)</Label><div className="grid grid-cols-12 gap-2"><div className="col-span-7"><Input id="mgkg" value={state.mgPerKgInput} onChange={(v)=>setState((s:any)=>({...s, mgPerKgInput:v}))} step="0.1" min="0" /></div><div className="col-span-5"><Select id="mgkgUnit" value={state.mgkgUnit} onChange={(v)=>setState((s:any)=>({...s, mgkgUnit:v}))}><option value="mg">mg</option><option value="mcg">mcg</option><option value="IU">IU</option><option value="units">units</option></Select></div></div></div>
+              <div className="col-span-12 md:col-span-3"><Label htmlFor="mldose">ขนาด (mL/dose)</Label><Input id="mldose" value={state.doseMlInput} onChange={(v)=>setState((s:any)=>({...s, doseMlInput:v}))} step="0.1" min="0" /></div>
+              <div className="col-span-12 md:col-span-3"><Label htmlFor="round">การปัดเศษปริมาตร</Label><Select id="round" value={state.roundingInc} onChange={(v)=>setState((s:any)=>({...s, roundingInc:v}))}><option value="0.1">0.1 mL</option><option value="0.2">0.2 mL</option><option value="0.5">0.5 mL</option><option value="1">1 mL</option></Select></div>
+              <div className="col-span-12 md:col-span-3"><Label htmlFor="interval">เว้นครั้ง (ชม.)</Label><Input id="interval" value={state.intervalHours} onChange={(v)=>setState((s:any)=>({...s, intervalHours:v}))} step="0.1" min="0.1" /></div>
+            </div>
+            <div className="grid grid-cols-12 gap-3 mt-2">
+              <div className="col-span-12 md:col-span-4"><Label htmlFor="doses">จำนวนครั้งต่อวัน (auto)</Label><Input id="doses" value={state.dosesPerDay} onChange={(v)=>setState((s:any)=>({...s, dosesPerDay:v}))} step="0.1" min="0.1" /><p className="text-xs text-emerald-600 mt-1">ระบบคำนวณจาก 24 ÷ ชั่วโมงเว้นครั้ง (แก้ไขได้)</p></div>
+              <div className="col-span-12 md:col-span-4"><Label htmlFor="maxday">ไม่เกิน/วัน (mg/day)</Label><Input id="maxday" value={state.maxPerDayMg} onChange={(v)=>setState((s:any)=>({...s, maxPerDayMg:v}))} step="1" min="0" /></div>
+              <div className="col-span-12 md:col-span-4"><Label htmlFor="maxkgday">ไม่เกิน/วัน (mg/kg/day)</Label><Input id="maxkgday" value={state.maxPerKgPerDay} onChange={(v)=>setState((s:any)=>({...s, maxPerKgPerDay:v}))} step="0.1" min="0" /></div>
+            </div>
+            {crossCheckNote && <div className="mt-2 rounded-xl bg-amber-50 border border-amber-200 p-3 text-amber-900 text-sm">{crossCheckNote}</div>}
+          </Section>
+
+          {/* 3) Results */}
+          <Section title="3) ผลลัพธ์" right={<div className="hidden lg:flex items-center gap-2 text-xs text-emerald-800"><span className="opacity-70">เข้าชม</span><span className="font-semibold">{usage.visitCount}</span><span className="opacity-70">| คำนวณ</span><span className="font-semibold">{usage.calcCount}</span><span className={`${online?"bg-emerald-600":"bg-rose-500"} h-2 w-2 rounded-full`} title={online?"ออนไลน์":"ออฟไลน์"}></span></div>}>
+            <div className="grid grid-cols-12 gap-3">
+              <div className="col-span-12 rounded-xl bg-emerald-50/80 border border-emerald-200 p-5 md:col-span-6 min-w-0 min-h-[140px] flex flex-col justify-between"><div className="text-sm text-emerald-800">1) ขนาดยาต่อครั้ง</div><div className="text-2xl font-bold text-emerald-900">{isFinite(mlPerDoseRounded as number) ? `${(mlPerDoseRounded as number).toFixed(dpForMl)} mL` : "-"}</div><div className="mt-2 text-sm text-emerald-700">จากความแรง {(() => { const ds = (mgkgUnit==='mg' || mgkgUnit==='mcg' || !isFinite(altUnitPerMl as number)) ? (isFinite(strengthMgPerMl as number) ? `${strengthMgPerMl} mg/mL` : '-') : `${altUnitPerMl} ${(altUnitLabel||'units')}/mL`; return ds; })()}</div></div>
+              <div className="col-span-12 rounded-xl bg-emerald-50/80 border border-emerald-200 p-5 md:col-span-6 min-w-0 min-h-[140px] flex flex-col justify-between"><div className="text-sm text-emerald-800">2) ปริมาณที่ได้รับต่อครั้ง</div><div className="text-2xl font-bold text-emerald-900">{isFinite(perDoseSelectedUnit as number) ? `${formatNumber(perDoseSelectedUnit as number, 2)} ${doseUnitLabel}/dose` : "-"}</div></div>
+              <div className="col-span-12 rounded-xl bg-emerald-50/80 border border-emerald-200 p-5 md:col-span-6 min-w-0 min-h-[140px] flex flex-col justify-between"><div className="text-sm text-emerald-800">3) ปริมาณที่ได้รับจริง</div><div className="text-2xl font-bold text-emerald-900">{isFinite(perKgSelectedUnit as number) ? `${formatNumber(perKgSelectedUnit as number, 2)} ${doseUnitLabel}/kg/dose` : "-"}</div><div className="mt-1 text-xs text-emerald-700">สูตร: (mL/dose × mg/mL) ÷ น้ำหนัก(kg)</div></div>
+              <div className="col-span-12 rounded-xl bg-emerald-50/80 border border-emerald-200 p-5 md:col-span-6 min-w-0 min-h-[140px] flex flex-col justify-between"><div className="text-sm text-emerald-800">4) เว้นครั้ง</div><div className="text-2xl font-bold text-emerald-900">{isFinite(toNumber(state.intervalHours) as number) ? `${(+state.intervalHours).toFixed(2)} ชม.` : "-"}</div><div className="mt-1 text-sm text-emerald-700">≈ {isFinite(dosesPerDay as number) ? `${(+state.dosesPerDay).toFixed(2)} ครั้ง/วัน` : "-"}</div></div>
+            </div>
+            <div className="mt-2.5 rounded-xl border p-4" style={{ borderColor: (exceedsMaxMgDay || exceedsMaxMgKgDay) ? "#fda4af" : "#c7eadb", background: (exceedsMaxMgDay || exceedsMaxMgKgDay) ? "#fff1f2" : "#f0fdf4" }}>
+              <div className="text-sm text-emerald-900">5) ตรวจสอบไม่เกิน/วัน</div>
+              <div className="text-emerald-950 text-lg font-semibold">{isFinite(mgPerDay as number) ? `ปริมาณรวม/วัน: ${formatNumber(mgPerDay as number, 2)} mg/day` : "-"}</div>
+              <div className="text-sm mt-1">{isFinite(maxPerDayMg as number) && (<span className={`${exceedsMaxMgDay ? "text-rose-700 font-semibold" : "text-emerald-700"}`}>ขีดสูงสุดที่ตั้งไว้: {formatNumber(maxPerDayMg as number, 2)} mg/day — {exceedsMaxMgDay ? "เกินขีดจำกัด" : "ไม่เกิน"}</span>)}</div>
+              {(isFinite(maxPerKgPerDay as number) && isFinite(mgPerKgActual as number) && isFinite(dosesPerDay as number)) && (<div className="text-sm mt-1"><span className={`${exceedsMaxMgKgDay ? "text-rose-700 font-semibold" : "text-emerald-700"}`}>รวม/วันแบบ mg/kg/day: {formatNumber((mgPerKgActual as number) * (dosesPerDay as number), 2)} mg/kg/day — ขีดสูงสุด {formatNumber(maxPerKgPerDay as number, 2)} ⇒ {exceedsMaxMgKgDay ? "เกินขีดจำกัด" : "ไม่เกิน"}</span></div>)}
+            </div>
+          </Section>
+
+          {/* 4) Total volume */}
+          <Section title="4) คำนวนปริมาตรรวม / จำนวนขนาด">
+            <div className="grid grid-cols-12 gap-3">
+              <div className="col-span-12 md:col-span-3"><Label htmlFor="days">ระยะวันรักษา (วัน)</Label><Input id="days" value={state.daysDuration} onChange={(v)=>setState((s:any)=>({...s, daysDuration:v}))} step="1" min="1" /></div>
+              <div className="col-span-12 md:col-span-3"><Label htmlFor="doses2">จำนวนครั้ง/วัน</Label><Input id="doses2" value={state.dosesPerDay} onChange={(v)=>setState((s:any)=>({...s, dosesPerDay:v}))} step="0.1" min="0.1" /></div>
+              <div className="col-span-12 md:col-span-3"><Label>รวมจำนวนขนาด</Label><div className="w-full rounded-xl border border-emerald-200 bg-emerald-50/50 px-3 py-2 min-h-[52px]">{isFinite(dosesPerDay as number) && isFinite(daysDuration as number) ? formatNumber((dosesPerDay as number) * (daysDuration as number), 2) : "-"}</div></div>
+              <div className="col-span-12 md:col-span-3"><Label>ปริมาตรรวม (mL)</Label><div className="w-full rounded-xl border border-emerald-200 bg-emerald-50/50 px-3 py-2 min-h-[52px]">{isFinite(totalVolumeMl as number) ? `${formatNumber(totalVolumeMl as number, dpForMl)}` : "-"}</div></div>
+              <div className="col-span-12 md:col-span-3"><Label htmlFor="bottle">ขนาดขวด (mL) (ตัวเลือก)</Label><Input id="bottle" value={state.bottleSizeMl} onChange={(v)=>setState((s:any)=>({...s, bottleSizeMl:v}))} step="1" min="1" /><div className="text-sm mt-1">{isFinite(bottlesNeeded as number) ? `≈ ${bottlesNeeded} ขวด` : " "}</div></div>
+            </div>
+          </Section>
+        </div>
+
+        {/* Right column: Add/Edit Product + Summary */}
+        <div className="col-span-1 lg:col-start-2 flex flex-col gap-5">
+          {/* Summary (its own section) */}
+          <Section title="สรุปสำหรับสั่งยา/ฉลาก & ตารางเวลาให้ยา (วันแรก)" right={<Button tone="soft" onClick={copySummaryToClipboard}>คัดลอกสรุป</Button>}>
+            <div className="grid grid-cols-12 gap-3">
+              <div className="col-span-12 md:col-span-4"><Label htmlFor="firstDose">เวลาโดสแรก</Label><Input id="firstDose" type="time" value={state.firstDoseTime} onChange={(v)=>setState((s:any)=>({...s, firstDoseTime:v}))} /></div>
+              <div className="col-span-12 md:col-span-8"><Label>ตารางเวลา (วันแรก)</Label><div className="flex flex-wrap gap-2">{computeDaySchedule(state.firstDoseTime, toNumber(state.intervalHours), Math.max(1, Math.floor(toNumber(state.dosesPerDay) || 0))).map(t => (<span key={t} className="inline-flex items-center rounded-xl border border-emerald-200 bg-white px-3 py-1 text-sm text-emerald-900 shadow-sm">{t}</span>))}</div></div>
+              <div className="col-span-12"><Label>สรุป (Copy‑ready)</Label><Textarea rows={6} value={buildCopySummary()} onChange={()=>{}} /></div>
+            </div>
+            <div className="mt-2 text-xs text-emerald-700 space-y-1"><div>แสดงมาตราฐาน: ชื่อยา — ความแรง — mL/dose — mg/dose — เว้น(ชม.) — ระยะวัน — ปริมาตรรวม/จำนวนขนาด</div><div>ปุ่ม "คัดลอกสรุป" เพื่อเอาไปพิมพ์ใบสั่ง/ฉลากยาได้ทันที</div></div>
+          </Section>
+
+          {/* Add/Edit Product (moved below summary) */}
+          <Section title="+ เพิ่มผลิตภัณฑ์ (แบบ mg/kg)">
+            {/* Add/Edit product form */}
+            <details ref={addFormRef} className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-3" open={state.addOpen} onToggle={(e)=> setState((s:any)=>({ ...s, addOpen: (e.target as HTMLDetailsElement).open }))}>
+              <summary className="cursor-pointer font-semibold text-emerald-900 select-none">+ เพิ่มผลิตภัณฑ์ (แบบ mg/kg)</summary>
+              <div className="mt-3 grid grid-cols-12 gap-3">
+                <div className="col-span-12 md:col-span-6"><Label htmlFor="addName">ชื่อ</Label><Input id="addName" type="text" value={state.addName} onChange={(v)=>setState((s:any)=>({...s, addName:v}))} placeholder="เช่น Paracetamol 250 mg/5 mL" /></div>
+                <div className="col-span-12 md:col-span-6"><Label htmlFor="addStrength">ความแรง (mg/mL)</Label><Input id="addStrength" value={state.addStrength} onChange={(v)=>setState((s:any)=>({...s, addStrength:v}))} placeholder="เช่น 24" step="0.1" min="0" /></div>
+                <div className="col-span-12 md:col-span-6"><Label htmlFor="addMgkgMin">ช่วง mg/kg (min)</Label><Input id="addMgkgMin" value={state.addMgkgMin} onChange={(v)=>setState((s:any)=>({...s, addMgkgMin:v}))} placeholder="10" step="0.01" /></div>
+                <div className="col-span-12 md:col-span-6"><Label htmlFor="addMgkgMax">ช่วง mg/kg (max)</Label><Input id="addMgkgMax" value={state.addMgkgMax} onChange={(v)=>setState((s:any)=>({...s, addMgkgMax:v}))} placeholder="15" step="0.01" /></div>
+                <div className="col-span-12 md:col-span-6"><Label htmlFor="addMgkgDefault">ค่ากลาง mg/kg</Label><Input id="addMgkgDefault" value={state.addMgkgDefault} onChange={(v)=>setState((s:any)=>({...s, addMgkgDefault:v}))} placeholder="12.5" step="0.1" min="0" /></div>
+                <div className="col-span-12 md:col-span-6"><Label htmlFor="addMinIntervalHours">เว้นอย่างน้อย (ชม.)</Label><Input id="addMinIntervalHours" value={state.addMinIntervalHours} onChange={(v)=>setState((s:any)=>({...s, addMinIntervalHours:v}))} placeholder="4" step="0.1" min="0" /></div>
+                <div className="col-span-12 md:col-span-6"><Label htmlFor="addMaxDosesPerDay">ครั้งสูงสุด/วัน</Label><Input id="addMaxDosesPerDay" value={state.addMaxDosesPerDay} onChange={(v)=>setState((s:any)=>({...s, addMaxDosesPerDay:v}))} placeholder="6" step="1" /></div>
+                <div className="col-span-12 md:col-span-6"><Label htmlFor="addMaxPerKgDay">สูงสุด/วัน (mg/kg)</Label><Input id="addMaxPerKgDay" value={state.addMaxPerKgDay} onChange={(v)=>setState((s:any)=>({...s, addMaxPerKgDay:v}))} /></div>
+                <div className="col-span-12 md:col-span-6"><Label htmlFor="addMaxPerDayMg">สูงสุด/วัน (mg)</Label><Input id="addMaxPerDayMg" value={state.addMaxPerDayMg} onChange={(v)=>setState((s:any)=>({...s, addMaxPerDayMg:v}))} /></div>
+                <div className="col-span-12 md:col-span-6"><Label htmlFor="addMaxPerDoseMg">สูงสุด/ครั้ง (mg)</Label><Input id="addMaxPerDoseMg" value={state.addMaxPerDoseMg} onChange={(v)=>setState((s:any)=>({...s, addMaxPerDoseMg:v}))} /></div>
+                <div className="col-span-12"><Label htmlFor="addNotes">หมายเหตุ</Label><Textarea id="addNotes" rows={2} value={state.addNotes} onChange={(v)=>setState((s:any)=>({...s, addNotes:v}))} placeholder={buildNoteFromMeta({ mgkgMin: toNumber(state.addMgkgMin), mgkgMax: toNumber(state.addMgkgMax), minIntervalHours: toNumber(state.addMinIntervalHours), maxPerKgPerDay: toNumber(state.addMaxPerKgDay), maxPerDayMg: toNumber(state.addMaxPerDayMg) }) || ''} /></div>
+                <div className="col-span-12"><Label htmlFor="addWarning">คำเตือน</Label><Textarea id="addWarning" rows={2} value={state.addWarning} onChange={(v)=>setState((s:any)=>({...s, addWarning:v}))} placeholder="เช่น อาจทำให้ง่วง/ควรรับประทานหลังอาหาร/หลีกเลี่ยงร่วมกับยากดประสาท" /></div>
+              </div>
+              <div className="mt-2 flex gap-2 items-center">
+                <Button onClick={upsertProductFromForm}>{state.editingProductId?"บันทึกการแก้ไข":"เพิ่มผลิตภัณฑ์"}</Button>
+                {state.editingProductId && <Button tone="soft" onClick={()=>setState((s:any)=>({...s, editingProductId:"", addName:"", addStrength:"", addMgkgRange:"", addMgkgDefault:"", addMgkgMin:"", addMgkgMax:"", addMinIntervalHours:"", addMaxDosesPerDay:"", addMaxPerKgDay:"", addMaxPerDayMg:"", addMaxPerDoseMg:"", addNotes:"", addWarning:""}))}>ยกเลิก</Button>}
+              </div>
+            </details>
+
+            {/* Sample list (toggle from header) */}
+            {state.samplesOpen && (
+              <div className="mt-4 rounded-2xl border border-emerald-200 bg-white">
+                <div className="flex items-center justify-between px-3 py-2 border-b border-emerald-100">
+                  <div className="font-semibold text-emerald-900">รายการตัวอย่าง (แก้ไขได้)</div>
+                  <div className="text-xs text-emerald-700">ทั้งหมด {filteredProducts.length} รายการ</div>
+                </div>
+                <div className="px-3 pt-2">
+                  <div className="flex items-center gap-2">
+                    <Label htmlFor="sortMode">การเรียง</Label>
+                    <Select id="sortMode" value={state.sortMode} onChange={(v)=>setState((s:any)=>({...s, sortMode:v}))}>
+                      <option value="alpha">ตามตัวอักษร (A–Z)</option>
+                      <option value="recent">ตามที่เพิ่มล่าสุด</option>
+                    </Select>
+                  </div>
+                </div>
+                <div className="p-3 grid grid-cols-1 gap-2">
+                  {filteredProducts.map((p) => (
+                    <div key={p.id} className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-3 flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="font-semibold text-emerald-900 truncate">{p.name}</div>
+                        <div className="text-sm text-emerald-700">
+                          {p.meta?.displayStrength ? p.meta.displayStrength : `${p.strengthMgPerMl} mg/mL`}
+                        </div>
+                        {p.meta?.notes && <div className="text-xs text-emerald-600 mt-1">{p.meta.notes}</div>}
+                      </div>
+                      <div className="shrink-0 flex gap-2">
+                        <Button tone="soft" onClick={()=>selectProduct(p.id, true)}>เลือก</Button>
+                        <Button tone="soft" onClick={()=>startEditProduct(p)}>แก้ไข</Button>
+                        <Button tone="danger" onClick={()=>removeProductById(p.id)}>ลบ</Button>
+                      </div>
+                    </div>
+                  ))}
+                  {!filteredProducts.length && (
+                    <div className="text-sm text-emerald-700 px-1 py-2">ไม่พบรายการที่ตรงกับ "{state.productQuery}"</div>
+                  )}
+                </div>
+              </div>
+            )}
+          </Section>
+        </div>
+
+        {/* Notes bottom */}
+        <div className="col-span-1 lg:col-span-2">
+          <Section title="หมายเหตุ / คำเตือน">
+            <ul className="list-disc pl-6 text-sm text-emerald-900 space-y-1">
+              <li>เครื่องมือนี้เป็นตัวช่วยคำนวณตามข้อมูลที่กรอกเท่านั้น ไม่ใช่คำแนะนำทางการแพทย์</li>
+              <li>โปรดยืนยันความแรงของยา (mg/mL) และขีดจำกัดต่อวันกับแหล่งอ้างอิงที่เชื่อถือได้ทุกครั้ง</li>
+              <li>หากกรอกทั้ง mg/kg/ครั้ง และ mL/ครั้ง ระบบจะแจ้งเตือนเมื่อค่าทั้งสองไม่สอดคล้องกัน (เฉพาะเมื่อกรอกทั้งสองค่า และต่างกันเกิน step การปัด)</li>
+              <li>สามารถเพิ่มรายการผลิตภัณฑ์เองได้ และกู้คืนรายการตัวอย่างเมื่อไรก็ได้</li>
+            </ul>
+          </Section>
+        </div>
+      </main>
+
+      <footer className="mx-auto max-w-screen-2xl px-4 pb-10 text-xs text-emerald-700/80">© {new Date().getFullYear()} NISAPHARMA — Pediatric Syrup Dose Calculator</footer>
+    </div>
+  );
+}
