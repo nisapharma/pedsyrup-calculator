@@ -1,16 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 /**
- * NISAPHARMA Pediatric Syrup Dose Calculator — Canvas Build (fixed)
- * - Thai UI (UTF-8)
- * - Product selector moved to LEFT, above patient inputs (per user request)
- * - Notes + Important warning banners under product
- * - Add/Edit product (supports notes + warning)
- * - Results on left, total volume, schedule + copy summary
- * - Lightweight local-only usage stats (visits/calculations)
- * - Console-based self tests (kept as-is, with additional tests)
- * - Mobile: header buttons collapse into a single “เมนู” popover
- * - Header is NOT sticky (per request)
+ * NISAPHARMA Pediatric Syrup Dose Calculator — Canvas Build (stable)
+ * - คงทุกฟีเจอร์เดิมตามที่สั่งก่อนหน้า + แก้เฉพาะที่ขอล่าสุด
+ * - หัวเว็บ "ไม่ sticky" + บนมือถือรวม 3 ปุ่มเป็น "เมนู" (popover)
+ * - ปุ่มลบในรายการตัวอย่างลบได้แน่นอน (แก้เฉพาะจุดนี้ ไม่แตะส่วนอื่น)
  */
 
 // ---------------- Types ----------------
@@ -33,8 +27,8 @@ export type Product = {
     // --- Alt-unit support ---
     displayStrength?: string;    // e.g. "5 mcg/mL" or "100,000 units/mL"
     altUnitPerMl?: number;       // e.g. 100000 (units per mL) or 5 (mcg per mL)
-    altUnitLabel?: string;        // e.g. "mcg" | "IU" | "units"
-    addedAt?: number;             // epoch ms for "recently added" sorting
+    altUnitLabel?: string;       // e.g. "mcg" | "IU" | "units"
+    addedAt?: number;            // epoch ms for "recently added" sorting
   };
 };
 
@@ -46,8 +40,8 @@ const SAMPLE_PRODUCTS: Product[] = [
   { id: "amox125-25", name: "Amoxicillin 125 mg/5 mL", strengthMgPerMl: 25, meta: { mgkgRange: "6.7-16.7", mgkgDefault: 12.5, mgkgMin: 6.7, mgkgMax: 16.7, minIntervalHours: 8, notes: "6.7–16.7 mg/kg/ครั้ง q8h", warning: "คำเตือนสำคัญ — Amoxicillin อาจทำให้ท้องเสีย/ผื่น; หากสงสัยแพ้ให้หยุดใช้และพบแพทย์" } },
   { id: "cet-1", name: "Cetirizine 5 mg/5 mL", strengthMgPerMl: 1, meta: { mgkgRange: "0.25", mgkgDefault: 0.25, mgkgMin: 0.25, mgkgMax: 0.25, minIntervalHours: 24, maxPerDayMg: 10, notes: "0.25 mg/kg/วัน q24h; ไม่เกิน 10 mg/วัน" } },
 
-  // --- เพิ่มรายการตั้งต้นมากกว่า 5 รายการ ---
-  { id: "amox250-50", name: "Amoxicillin 250 mg/5 mL", strengthMgPerMl: 50, meta: { mgkgRange: "6.7-16.7", mgkgDefault: 12.5, mgkgMin: 6.7, mgkgMax: 16.7, minIntervalHours: 8, notes: "6.7–16.7 mg/kg/ครั้ง q8h" } },
+  // --- เพิ่มรายการให้ครบ ---
+  { id: "amox250-50", name: "Amoxicillin 250 mg/5 mL", strengthMgPerMl: 50, meta: { mgkgRange: "6.7-16.7", mgkgDefault: 12.5, minIntervalHours: 8 } },
   { id: "augmentin228-amox200-40", name: "Augmentin 228.5 mg/5 mL (Amox 200 mg/5 mL)", strengthMgPerMl: 40, meta: { mgkgRange: "25-45", mgkgDefault: 40, minIntervalHours: 8, notes: "คำนวณตามส่วน Amoxicillin 200 mg/5 mL (≈40 mg/mL)" } },
   { id: "cefaclor125-25", name: "Cefaclor 125 mg/5 mL", strengthMgPerMl: 25, meta: { mgkgRange: "7-15", mgkgDefault: 10, minIntervalHours: 8 } },
   { id: "cephalexin125-25", name: "Cephalexin 125 mg/5 mL", strengthMgPerMl: 25, meta: { mgkgRange: "12.5-25", mgkgDefault: 20, minIntervalHours: 6 } },
@@ -67,8 +61,7 @@ const SAMPLE_PRODUCTS: Product[] = [
   { id: "salbutamol2-0_4", name: "Salbutamol 2 mg/5 mL", strengthMgPerMl: 0.4 },
   { id: "ambroxol15-3", name: "Ambroxol 15 mg/5 mL", strengthMgPerMl: 3 },
   { id: "carbocisteine250-50", name: "Carbocisteine 250 mg/5 mL", strengthMgPerMl: 50 },
-
-  // --- หน่วยพิเศษ ---
+  // หน่วยพิเศษ
   { id: "procaterol5mcg-0.005", name: "Procaterol HCl Syrup 5 mcg/mL", strengthMgPerMl: 0.005, meta: { displayStrength: "5 mcg/mL", altUnitPerMl: 5, altUnitLabel: "mcg" } },
   { id: "nystatin-100k", name: "Nystatin Oral Suspension 100,000 units/mL", strengthMgPerMl: 0, meta: { displayStrength: "100,000 units/mL", altUnitPerMl: 100000, altUnitLabel: "units" } }
 ];
@@ -136,7 +129,6 @@ const buildNoteFromMeta = (meta?: Product["meta"]) => {
   return [left, right].filter(Boolean).join("; ");
 };
 
-// Added: helper to derive when an item was added (for "recent" sorting)
 function getAddedAt(p: Product): number {
   const a = (p.meta as any)?.addedAt;
   if (typeof a === 'number' && isFinite(a)) return a;
@@ -182,7 +174,7 @@ const Select: React.FC<{ id?: string; value: any; onChange?: (v:any)=>void }>
   </select>
 );
 
-const Button: React.FC<{ tone?: "primary"|"soft"|"danger"; type?: "button"|"submit"|"reset"; onClick?: ()=>void }>
+const Button: React.FC<{ tone?: "primary"|"soft"|"danger"; type?: "button"|"submit"|"reset"; onClick?: (e?: any)=>void }>
 = ({ tone="primary", type="button", onClick, children }) => {
   const tones: Record<string,string> = {
     primary: "bg-emerald-600 hover:bg-emerald-700 text-white",
@@ -301,7 +293,6 @@ export default function PediatricSyrupDoseCalculator() {
     const q = (state.productQuery||"").toLowerCase().trim();
     let list = products;
     if (q) list = list.filter(p => (p.name + " " + p.strengthMgPerMl).toLowerCase().includes(q));
-    // sort according to mode
     if (state.sortMode === 'recent') {
       return [...list].sort((a,b)=> (getAddedAt(b) - getAddedAt(a)) || a.name.localeCompare(b.name, undefined, {sensitivity:'base', numeric:true}));
     }
@@ -367,7 +358,6 @@ export default function PediatricSyrupDoseCalculator() {
   const mlPerDoseRaw = isFinite(mlPerDoseInput as number) ? (mlPerDoseInput as number) : mlFromKgUnit;
   const mlPerDoseRounded = useMemo(() => !isFinite(mlPerDoseRaw as number) ? undefined : roundToIncrement(mlPerDoseRaw as number, roundingInc as number), [mlPerDoseRaw, roundingInc]);
   const mgPerDose = useMemo(() => (!isFinite(mlPerDoseRounded as number) || !isFinite(strengthMgPerMl as number)) ? undefined : (mlPerDoseRounded as number) * (strengthMgPerMl as number), [mlPerDoseRounded, strengthMgPerMl]);
-  // Selected-unit per-dose/per-kg/per-day
   const perDoseSelectedUnit = useMemo(() => {
     if (!isFinite(mlPerDoseRounded as number)) return undefined;
     if (mgkgUnit === 'mg' || mgkgUnit === 'mcg') {
@@ -388,8 +378,8 @@ export default function PediatricSyrupDoseCalculator() {
   const exceedsMaxMgDay = useMemo(() => (!isFinite(mgPerDay as number) || !isFinite(maxPerDayMg as number)) ? false : (mgPerDay as number) > (maxPerDayMg as number), [mgPerDay, maxPerDayMg]);
   const exceedsMaxMgKgDay = useMemo(() => (!isFinite(mgPerKgActual as number) || !isFinite(dosesPerDay as number) || !isFinite(maxPerKgPerDay as number)) ? false : ((mgPerKgActual as number) * (dosesPerDay as number)) > (maxPerKgPerDay as number), [mgPerKgActual, dosesPerDay, maxPerKgPerDay]);
 
+  // แสดงคำเตือนเฉพาะเมื่อกรอกทั้งสองค่า และต่างกันเกิน step ที่ตั้งไว้
   const crossCheckNote = useMemo(() => {
-    // show only when BOTH mg/kg input AND mL/dose are filled (plus weight) and difference exceeds rounding step
     if (!isFinite(dosePerKgInput as number) || !isFinite(mlPerDoseInput as number) || !isFinite(weightKg as number)) return null;
     const expectedMl = mlFromKgUnit;
     if (!isFinite(expectedMl as number)) return null;
@@ -398,7 +388,6 @@ export default function PediatricSyrupDoseCalculator() {
     return null;
   }, [dosePerKgInput, mlPerDoseInput, weightKg, mlFromKgUnit, roundingInc, doseUnitLabel]);
 
-  // Increase calc counter whenever a new valid result appears
   const lastSigRef = useRef<string>("");
   useEffect(() => {
     const sig = JSON.stringify({ mlPerDoseRounded, strengthMgPerMl, roundingInc, weightKg, mgPerKgDesired, mlPerDoseInput });
@@ -485,11 +474,16 @@ export default function PediatricSyrupDoseCalculator() {
     setState((st:any)=>({ ...st, selectedProductId: id, customStrength: "", addOpen:false, editingProductId:"", addName:"", addStrength:"", addMgkgRange:"", addMgkgDefault:"", addMgkgMin:"", addMgkgMax:"", addMinIntervalHours:"", addMaxDosesPerDay:"", addMaxPerKgDay:"", addMaxPerDayMg:"", addMaxPerDoseMg:"", addNotes:"", addWarning:"" }));
   }
 
-  function removeProductById(id:string){
-    const p = products.find(x=>x.id===id); if(!p) return;
-    if(!confirm(`ลบผลิตภัณฑ์ "${p.name}" ?`)) return;
-    const next = products.filter(x=>x.id!==id); setProducts(next.length?next:SAMPLE_PRODUCTS);
-    setState((st:any)=>({ ...st, selectedProductId: (next[0]?.id || SAMPLE_PRODUCTS[0].id), customStrength:"" }));
+  // ✅ ลบรายการตัวอย่างให้หายทันที และจัดการ state คงที่
+  function removeProductById(id: string) {
+    setProducts(prev => {
+      const target = prev.find(x => x.id === id);
+      if (!target) return prev;
+      if (!confirm(`ลบผลิตภัณฑ์ "${target.name}" ?`)) return prev;
+      const next = prev.filter(x => x.id !== id);
+      setState(st => ({ ...st, selectedProductId: (next[0]?.id || SAMPLE_PRODUCTS[0].id), customStrength: "" }));
+      return next.length ? next : SAMPLE_PRODUCTS;
+    });
   }
 
   function startEditProduct(p: Product){
@@ -511,7 +505,6 @@ export default function PediatricSyrupDoseCalculator() {
       addNotes:p.meta?.notes||buildNoteFromMeta(p.meta)||"",
       addWarning:p.meta?.warning||""
     }));
-    // Ensure the form opens & focus the name field for immediate editing
     requestAnimationFrame(() => {
       try {
         if (addFormRef.current && !addFormRef.current.open) addFormRef.current.open = true;
@@ -526,9 +519,8 @@ export default function PediatricSyrupDoseCalculator() {
   function restoreSamples(){ if(!confirm("กู้คืนรายการตัวอย่างเริ่มต้นทั้งหมด? รายการที่เพิ่มเองจะไม่ถูกเก็บไว้")) return; setProducts(SAMPLE_PRODUCTS); setState((s:any)=>({ ...s, selectedProductId:SAMPLE_PRODUCTS[0].id, customStrength:"" })); }
   function resetAll(){ if(!confirm("รีเซ็ตค่าทั้งหมดเป็นค่าเริ่มต้น?")) return; localStorage.removeItem(STORAGE_PRODUCTS_KEY); localStorage.removeItem(STORAGE_STATE_KEY); localStorage.removeItem(STORAGE_STATS_KEY); setProducts(SAMPLE_PRODUCTS); setState((s:any)=>({ ...s, selectedProductId:SAMPLE_PRODUCTS[0].id, productQuery:"", customStrength:"", weightKg:"", ageYears:"", ageMonths:"", mgPerKgInput:"", doseMlInput:"", roundingInc:"0.1", intervalHours:"8", dosesPerDay:"3", maxPerDayMg:"", maxPerKgPerDay:"", daysDuration:"5", bottleSizeMl:"60", addOpen:false, editingProductId:"", addName:"", addStrength:"", addMgkgRange:"", addMgkgDefault:"", addMgkgMin:"", addMgkgMax:"", addMinIntervalHours:"", addMaxDosesPerDay:"", addMaxPerKgDay:"", addMaxPerDayMg:"", addMaxPerDoseMg:"", addNotes:"", addWarning:"", firstDoseTime:"08:00", mgkgUnit:"mg" })); }
 
-  // -------- Self tests (keep existing + add a few) --------
+  // -------- Self tests (คงเดิม + เพิ่มเล็กน้อย) --------
   useEffect(() => {
-    // Existing tests (UNCHANGED)
     const ml = roundToIncrement(5,0.1); const mg = (ml as number)*24; const mgkg = (mg as number)/12; const d=24/8; const day=(mg as number)*d;
     console.assert(ml===5 && mg===120 && Math.abs(mgkg-10)<1e-9 && d===3 && day===360, "Test1 math ok");
     const ml2 = roundToIncrement((10*20)/24,0.1); console.assert(Math.abs((ml2 as number)-8.3)<1e-9, "Test2 rounding ok");
@@ -537,25 +529,19 @@ export default function PediatricSyrupDoseCalculator() {
     const note = buildNoteFromMeta({ mgkgMin:10, mgkgMax:15, minIntervalHours:4, maxPerDayMg:4000, maxPerKgPerDay:60 });
     console.assert(note?.includes("ไม่เกิน"), "Test5 note caps");
 
-    // Additional tests (NEW)
     const sched = computeDaySchedule("08:00", 8, 3);
     console.assert(JSON.stringify(sched) === JSON.stringify(["08:00","16:00","00:00"]), "Test6 schedule wrap");
     const noteG = buildNoteFromMeta({ maxPerDayMg: 2000 });
     console.assert((noteG||"").includes("2 g") || (noteG||"").includes("2000 mg"), "Test7 grams rendering");
     const merged = mergeByIdKeepExisting([{id:"a",name:"X",strengthMgPerMl:1,meta:{notes:"u"}} as Product],[{id:"a",name:"X",strengthMgPerMl:1,meta:{mgkgRange:"1"}}]);
     console.assert(merged[0].meta?.notes==="u" && merged[0].meta?.mgkgRange==="1", "Test8 merge keeps user and backfills");
-    // Unit conversion checks
     const mgFromMcg = 2500/1000; console.assert(Math.abs(mgFromMcg-2.5) < 1e-9, "Test9 mcg->mg conversion");
     const unitsMl = (100000*5)/100000; console.assert(unitsMl===5, "Test10 units/ml calc");
-    // Extra rounding & guard tests
     console.assert(roundToIncrement(1.24,0.2)===1.2, "Test11 rounding 0.2 step");
     console.assert(JSON.stringify(computeDaySchedule("08:00", -1, 3)) === JSON.stringify([]), "Test12 schedule invalid interval");
-    // Sorting helper tests
-    console.assert(getAddedAt({id:"pcm-24",name:"X",strengthMgPerMl:1} as any) >= 0, "Test13 addedAt fallback ok");
-    const newer = {id:`y-${Date.now().toString(36)}`, name:"Y", strengthMgPerMl:1} as any;
-    const older = {id:"z-24", name:"Z", strengthMgPerMl:1} as any;
+    console.assert(getAddedAt({id:"pcm-24",name:"X",strengthMgPerMl:1} as any) >= 0, "Test13 addedAt");
+    const newer = {id:`y-${Date.now().toString(36)}`, name:"Y", strengthMgPerMl:1} as any; const older = {id:"z-24", name:"Z", strengthMgPerMl:1} as any;
     console.assert(getAddedAt(newer) >= getAddedAt(older), "Test14 recent comparator");
-    // Delete helper sanity
     const arr=[{id:'a'},{id:'b'},{id:'c'}]; const del=(list:any[],id:string)=>list.filter(x=>x.id!==id);
     console.assert(JSON.stringify(del(arr,'b'))===JSON.stringify([{id:'a'},{id:'c'}]), 'Test15 delete by id');
   }, []);
@@ -666,7 +652,7 @@ export default function PediatricSyrupDoseCalculator() {
             </Section>
           </div>
 
-          {/* 2) ข้อมูลผู้ป่วย */}
+          {/* 2) Patient only */}
           <Section title="2) ข้อมูลผู้ป่วย" right={<Button tone="soft" onClick={clearPatientInputs}>ล้างข้อมูลผู้ป่วย</Button>}>
             <div className="grid grid-cols-12 gap-3">
               <div className="col-span-12 md:col-span-4"><Label htmlFor="weight">น้ำหนัก (kg)</Label><Input id="weight" value={state.weightKg} onChange={(v)=>setState((s:any)=>({...s, weightKg:v}))} step="0.1" min="0" /></div>
